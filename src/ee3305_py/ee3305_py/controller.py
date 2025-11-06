@@ -32,13 +32,35 @@ class Controller(Node):
 
         # Handles: Topic Subscribers
         # !TODO: path subscriber
+        self.sub_path_ = self.create_subscription(
+            Path,
+            "path",
+            self.callbackSubPath_,
+            10,
+        )
 
         # !TODO: odometry subscriber
-
+        self.sub_odom_ = self.create_subscription(
+            Odometry,
+            "odom",
+            self.callbackSubOdom_,
+            10,
+        )
+        
         # Handles: Topic Publishers
         # !TODO: command velocities publisher
-
+        self.pub_cmd_vel_ = self.create_publisher(
+            TwistStamped,
+            "cmd_vel",
+            10
+        )
+        
         # !TODO: lookahead point publisher
+        self.pub_lookahead_ = self.create_publisher(
+            PoseStamped,
+            "lookahead",
+            10
+        )
         
         # Handles: Timers
         self.timer = self.create_timer(1.0 / self.frequency_, self.callbackTimer_)
@@ -56,7 +78,7 @@ class Controller(Node):
             return  # do not update the path if no path is returned. This will ensure the copied path contains at least one point when the first non-empty path is received.
 
         # !TODO: copy the array from the path
-        self.path_poses_ = []
+        self.path_poses_ = msg.poses
 
         self.received_path_ = True
 
@@ -64,10 +86,14 @@ class Controller(Node):
     def callbackSubOdom_(self, msg: Odometry):
         # !TODO: write robot pose to rbt_x_, rbt_y_, rbt_yaw_
         self.rbt_x_ = msg.pose.pose.position.x
+        self.rbt_y_ = msg.pose.pose.position.y
+        self.rbt_yaw_ = msg.pose.pose.position.yaw
 
         q = msg.pose.pose.orientation
-        self.rbt_yaw_ = q.w
-
+        delta_y = 2 * (q.x * q.y + q.w * q.z)
+        delta_x = 1 - 2 * (q.y * q.y + q.z * q.z)
+        self.rbt_yaw_ = atan2(delta_y, delta_x)
+        
         self.received_odom_ = True
 
     # Gets the lookahead point's coordinates based on the current robot's position and planner's path
@@ -104,17 +130,39 @@ class Controller(Node):
         lookahead_x, lookahead_y = self.getLookaheadPoint_()
 
         # get distance to lookahead point (not to be confused with lookahead_distance)
-
+        dist_to_lookahead = hypot(lookahead_x - self.rbt_x_, lookahead_y - self.rbt_y_)
+        
         # stop the robot if close to the point.
-
+        if dist_to_lookahead < self.stop_thres_:
+                msg_stop = TwistStamped()
+                msg_stop.header.stamp = self.get_clock().now().to_msg()
+                msg_stop.twist.linear.x = 0.0
+                msg_stop.twist.angular.z = 0.0
+                self.pub_cmd_vel_.publish(msg_stop)
+                self.get_logger().info("Near looksahead. Stopping the robot.")
+                return
+            
         # get curvature
+        diff_x = lookahead_x - self.rbt_x_
+        diff_y = lookahead_y - self.rbt_y_
+
+        dx = (diff_x * cos(self.rbt_yaw_)) + (diff_y * sin(self.rbt_yaw_))
+        dy = (diff_y * cos(self.rbt_yaw_)) - (diff_x * sin(self.rbt_yaw_))
+        d = hypot(dx, dy)   # distance to lookahead in robot frame
+
+        if d == 0:
+            curvature = 0.0
+        else:       
+            curvature = (2.0 * dy) / (d * d)  # curvature formula
 
         # calculate velocities
+        lin_vel = self.lookahead_lin_vel_
+        ang_vel = lin_vel * curvature
 
         # saturate velocities. The following can result in the wrong curvature,
         # but only when the robot is travelling too fast (which should not occur if well tuned).
-        lin_vel = 0.0
-        ang_vel = 0.0 * lookahead_x * lookahead_y
+        lin_vel = max(-self.max_lin_vel_, min(self.max_lin_vel_, lin_vel))
+        ang_vel = max(-self.max_ang_vel_, min(self.max_ang_vel_, ang_vel))
 
         # publish velocities
         msg_cmd_vel = TwistStamped()
